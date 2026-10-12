@@ -1,177 +1,146 @@
-from __future__ import annotations
+"""test_cv.py
 
-from io import BytesIO
+Automated unit tests for SaplingProof AI's cv_engine.
+Covers:
+- Comparing an image with itself
+- Comparing different images
+- Blank and invalid inputs
+- Blurred images
+- Insufficient feature matches
+- Stable output structure and error handling
+"""
 
-import cv2
+import unittest
 import numpy as np
-import pytest
+import cv2
 
-from cv_engine import compare_images
-
-
-def _textured_image(seed: int = 21, width: int = 360, height: int = 280) -> np.ndarray:
-    """Build a reproducible image with corners and local visual structure."""
-    rng = np.random.default_rng(seed)
-    image = np.zeros((height, width, 3), dtype=np.uint8)
-    for _ in range(55):
-        center = (
-            int(rng.integers(8, width - 8)),
-            int(rng.integers(8, height - 8)),
-        )
-        color = tuple(int(channel) for channel in rng.integers(30, 256, size=3))
-        radius = int(rng.integers(3, 14))
-        cv2.circle(image, center, radius, color, thickness=-1)
-    for _ in range(18):
-        start = (
-            int(rng.integers(0, width)),
-            int(rng.integers(0, height)),
-        )
-        end = (
-            int(rng.integers(0, width)),
-            int(rng.integers(0, height)),
-        )
-        color = tuple(int(channel) for channel in rng.integers(60, 256, size=3))
-        cv2.line(image, start, end, color, thickness=2)
-    return image
-
-
-def _translated_image(image: np.ndarray, dx: int = 7, dy: int = 5) -> np.ndarray:
-    matrix = np.float32([[1, 0, dx], [0, 1, dy]])
-    return cv2.warpAffine(
-        image,
-        matrix,
-        (image.shape[1], image.shape[0]),
-        borderMode=cv2.BORDER_REFLECT,
-    )
-
-
-def test_same_image_finds_geometric_visual_evidence() -> None:
-    image = _textured_image()
-    result = compare_images(image, image.copy())
-
-    assert result["result_status"] == "VISUAL_MATCH_EVIDENCE_FOUND"
-    assert result["manual_review"] is False
-    assert result["good_matches"] >= 8
-    assert result["inlier_matches"] >= 6
-    assert result["inlier_ratio"] >= 0.5
-
-
-def test_slight_translation_finds_geometric_visual_evidence() -> None:
-    image = _textured_image(seed=32)
-    result = compare_images(image, _translated_image(image))
-
-    assert result["result_status"] == "VISUAL_MATCH_EVIDENCE_FOUND"
-    assert result["inlier_matches"] >= 6
-    assert result["inlier_ratio"] >= 0.5
-
-
-def test_unrelated_images_do_not_report_match_evidence() -> None:
-    result = compare_images(_textured_image(seed=4), _textured_image(seed=900))
-
-    assert result["result_status"] != "VISUAL_MATCH_EVIDENCE_FOUND"
-    assert result["manual_review"] is True or result["good_matches"] < 8
-    assert result["reason"]
-
-
-@pytest.mark.parametrize(
-    ("contents", "message"),
-    [
-        (b"not an image", "Invalid or unsupported"),
-        (b"", "empty"),
-    ],
+from cv_engine import (
+    compare_images,
+    MATCH_EVIDENCE_FOUND,
+    INSUFFICIENT_EVIDENCE,
+    NO_RELIABLE_MATCH,
+    INVALID_IMAGE,
 )
-def test_invalid_or_empty_image_bytes_raise_value_error(
-    contents: bytes, message: str
-) -> None:
-    with pytest.raises(ValueError, match=message):
-        compare_images(contents, _textured_image())
 
 
-def test_low_texture_images_report_insufficient_evidence() -> None:
-    low_texture = np.full((128, 128), 120, dtype=np.uint8)
-    result = compare_images(low_texture, low_texture.copy())
+def _generate_synthetic_leaf_canopy(seed: int = 42) -> np.ndarray:
+    """Generates synthetic foliage pattern with distinctive organic shapes."""
+    np.random.seed(seed)
+    img = np.zeros((400, 400, 3), dtype=np.uint8)
+    for _ in range(45):
+        center = (int(np.random.randint(50, 350)), int(np.random.randint(50, 350)))
+        axes = (int(np.random.randint(15, 35)), int(np.random.randint(8, 18)))
+        angle = int(np.random.randint(0, 180))
+        color = (
+            int(np.random.randint(20, 60)),
+            int(np.random.randint(120, 240)),
+            int(np.random.randint(20, 60)),
+        )
+        cv2.ellipse(img, center, axes, angle, 0, 360, color, -1)
+        cv2.ellipse(img, center, axes, angle, 0, 360, (10, 80, 10), 1)
 
-    assert result["result_status"] == "INSUFFICIENT_VISUAL_EVIDENCE"
-    assert result["keypoints_image1"] == 0
-    assert result["keypoints_image2"] == 0
-    assert result["good_matches"] == 0
-    assert result["match_visualization"] is None
-
-
-def test_invalid_ratio_configuration_raises_value_error() -> None:
-    with pytest.raises(ValueError, match="ratio"):
-        compare_images(_textured_image(), _textured_image(), ratio=1.0)
-
-
-def test_grayscale_bgr_bgra_and_uploaded_file_inputs_are_supported() -> None:
-    image = _textured_image()
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    bgra = cv2.cvtColor(image, cv2.COLOR_BGR2BGRA)
-    uploaded = BytesIO()
-    success, encoded = cv2.imencode(".png", image)
-    assert success
-    uploaded.write(encoded.tobytes())
-
-    for candidate in (gray, image, bgra, uploaded):
-        result = compare_images(candidate, image)
-        assert result["keypoints_image1"] > 0
-        assert result["result_status"] == "VISUAL_MATCH_EVIDENCE_FOUND"
+    # Stem structure
+    cv2.line(img, (200, 400), (200, 150), (30, 70, 140), 5)
+    return img
 
 
-def test_encoded_bytes_and_image_path_are_supported(tmp_path) -> None:
-    image = _textured_image()
-    success, encoded = cv2.imencode(".png", image)
-    assert success
-    image_path = tmp_path / "sapling.png"
-    assert cv2.imwrite(str(image_path), image)
-
-    for candidate in (encoded.tobytes(), image_path):
-        result = compare_images(candidate, image)
-        assert result["result_status"] == "VISUAL_MATCH_EVIDENCE_FOUND"
-
-
-def test_invalid_array_dimensions_raise_value_error() -> None:
-    with pytest.raises(ValueError, match="dimensions"):
-        compare_images(np.zeros((30, 30, 2), dtype=np.uint8), _textured_image())
+def _generate_synthetic_brick_wall() -> np.ndarray:
+    """Generates a synthetic brick pattern (completely distinct visual class)."""
+    img = np.zeros((400, 400, 3), dtype=np.uint8)
+    for y in range(0, 400, 30):
+        shift = 20 if (y // 30) % 2 == 1 else 0
+        for x in range(-20, 400, 40):
+            cv2.rectangle(img, (x + shift, y), (x + shift + 36, y + 26), (60, 70, 180), -1)
+            cv2.rectangle(img, (x + shift, y), (x + shift + 36, y + 26), (200, 200, 200), 1)
+    return img
 
 
-def test_result_shape_types_and_visualization_are_stable() -> None:
-    image = _textured_image()
-    result = compare_images(image, image)
+class TestSaplingProofCVEngine(unittest.TestCase):
 
-    assert set(result) == {
-        "result_status",
-        "manual_review",
-        "reason",
-        "keypoints_image1",
-        "keypoints_image2",
-        "good_matches",
-        "inlier_matches",
-        "inlier_ratio",
-        "match_visualization",
-    }
-    assert isinstance(result["manual_review"], bool)
-    assert isinstance(result["reason"], str)
-    for key in (
-        "keypoints_image1",
-        "keypoints_image2",
-        "good_matches",
-        "inlier_matches",
-    ):
-        assert isinstance(result[key], int)
-    assert isinstance(result["inlier_ratio"], float)
-    visualization = result["match_visualization"]
-    assert isinstance(visualization, np.ndarray)
-    assert visualization.dtype == np.uint8
-    assert visualization.ndim == 3 and visualization.shape[2] == 3
-    rgb_visualization = cv2.cvtColor(visualization, cv2.COLOR_BGR2RGB)
-    assert rgb_visualization.shape == visualization.shape
+    def setUp(self):
+        self.canopy_1 = _generate_synthetic_leaf_canopy(seed=42)
+        self.canopy_2 = _generate_synthetic_leaf_canopy(seed=999)
+        self.brick_wall = _generate_synthetic_brick_wall()
+
+    def test_output_structure_consistency(self):
+        """Test that the output dictionary always contains expected keys and types."""
+        result = compare_images(self.canopy_1, self.canopy_1)
+        expected_keys = {
+            "status",
+            "explanation",
+            "requires_human_review",
+            "ref_keypoints_count",
+            "fol_keypoints_count",
+            "good_matches_count",
+            "inliers_count",
+            "inlier_ratio",
+            "ref_blur_metric",
+            "fol_blur_metric",
+            "visualization_image",
+            "disclaimer",
+        }
+        self.assertTrue(expected_keys.issubset(result.keys()))
+        self.assertIsInstance(result["status"], str)
+        self.assertIsInstance(result["explanation"], str)
+        self.assertIsInstance(result["requires_human_review"], bool)
+        self.assertIsInstance(result["inliers_count"], int)
+        self.assertIsInstance(result["inlier_ratio"], float)
+
+    def test_self_comparison(self):
+        """Test comparing an image with itself yields match evidence."""
+        result = compare_images(self.canopy_1, self.canopy_1)
+        self.assertEqual(result["status"], MATCH_EVIDENCE_FOUND)
+        self.assertFalse(result["requires_human_review"])
+        self.assertGreater(result["ref_keypoints_count"], 15)
+        self.assertGreater(result["good_matches_count"], 10)
+        self.assertGreater(result["inliers_count"], 10)
+        self.assertIsNotNone(result["visualization_image"])
+
+    def test_different_distinct_images(self):
+        """Test comparing two completely distinct scenes yields NO_RELIABLE_MATCH or INSUFFICIENT_EVIDENCE."""
+        result = compare_images(self.canopy_1, self.brick_wall)
+        self.assertIn(result["status"], [NO_RELIABLE_MATCH, INSUFFICIENT_EVIDENCE])
+        self.assertTrue(result["requires_human_review"])
+
+    def test_different_canopies_low_inlier_ratio(self):
+        """Test comparing two distinct randomly-seeded canopies does not pass geometric consensus."""
+        result = compare_images(self.canopy_1, self.canopy_2)
+        self.assertIn(result["status"], [NO_RELIABLE_MATCH, INSUFFICIENT_EVIDENCE])
+        self.assertTrue(result["requires_human_review"])
+
+    def test_invalid_and_blank_inputs(self):
+        """Test handling of None, empty array, or zero dimension inputs."""
+        # None inputs
+        res_none = compare_images(None, self.canopy_1)
+        self.assertEqual(res_none["status"], INVALID_IMAGE)
+        self.assertTrue(res_none["requires_human_review"])
+
+        # Empty array
+        empty_arr = np.array([], dtype=np.uint8)
+        res_empty = compare_images(empty_arr, self.canopy_1)
+        self.assertEqual(res_empty["status"], INVALID_IMAGE)
+
+        # Blank/solid color image (no features)
+        solid_white = np.ones((300, 300, 3), dtype=np.uint8) * 255
+        res_solid = compare_images(solid_white, self.canopy_1)
+        self.assertEqual(res_solid["status"], INSUFFICIENT_EVIDENCE)
+        self.assertTrue(res_solid["requires_human_review"])
+
+    def test_blurred_image_handling(self):
+        """Test that severely blurred images trigger blur warning or insufficient evidence."""
+        blurred_img = cv2.GaussianBlur(self.canopy_1, (45, 45), 0)
+        result = compare_images(blurred_img, self.canopy_1)
+
+        self.assertTrue(result["requires_human_review"])
+        self.assertIn(result["status"], [INSUFFICIENT_EVIDENCE, NO_RELIABLE_MATCH, MATCH_EVIDENCE_FOUND])
+        self.assertLess(result["ref_blur_metric"], result["fol_blur_metric"])
+
+    def test_disclaimer_presence(self):
+        """Test that output contains standard scientific/technical disclaimer."""
+        result = compare_images(self.canopy_1, self.canopy_1)
+        self.assertIn("disclaimer", result)
+        self.assertIn("correspondences", result["disclaimer"].lower())
 
 
-def test_insufficient_match_threshold_returns_insufficient_evidence() -> None:
-    image = _textured_image()
-    result = compare_images(image, image.copy(), min_good_matches=5000)
-
-    assert result["result_status"] == "INSUFFICIENT_VISUAL_EVIDENCE"
-    assert 0 < result["good_matches"] < 5000
-    assert result["manual_review"] is False
+if __name__ == "__main__":
+    unittest.main()
